@@ -18,6 +18,7 @@ import random
 cfg = configparser.ConfigParser()
 cfg.read("config.ini")
 
+
 class GetUser(threading.Thread):
     session = None
     config = None
@@ -42,7 +43,7 @@ class GetUser(threading.Thread):
     xsrf = ''
     db = None
     db_cursor = None
-    max_queue_len = 1000  # redis带抓取用户队列最大长度
+    max_queue_len = 40  # redis带抓取用户队列最大长度
     ua = (
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_7_0) AppleWebKit/535.11 (KHTML, like Gecko) Chrome/17.0.963.56 Safari/535.11',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36',
@@ -132,13 +133,28 @@ class GetUser(threading.Thread):
             pass
         return index_html.text
 
+    # 获取首页html
+    def get_url_page(self, name_url):
+        try:
+                index_html = self.session.get(name_url, headers=self.headers, timeout=100)
+        except Exception as err:
+                # 出现异常重试
+                print("获取页面失败，正在重试......")
+                print(err)
+                traceback.print_exc()
+                return None
+        finally:
+                self.save_cookie()
+                pass
+        return index_html.text
+
     # 获取首页上的用户列表，存入redis
     def get_index_page_user(self):
         index_html = self.get_index_page()
         if not index_html:
             return
         BS = BeautifulSoup(index_html, "html.parser")
-        user_a = BS.find_all("a", class_="author-link")  # 获取用户的a标签
+        user_a = BS.find_all("a", class_="ExploreCollectionCard-creatorName")  # 获取用户的a标签
         for a in user_a:
             if a:
                 href = a.get('href')
@@ -165,101 +181,6 @@ class GetUser(threading.Thread):
             pass
         return index_html.text
 
-    # 分析粉丝接口获取用户的所有粉丝用户
-    # @param follower_page get_follower_page()中获取到的页面，这里获取用户hash_id请求粉丝接口获取粉丝信息
-    def get_all_follower(self, name_url):
-        follower_api = self.get_follower_page(name_url)
-        # 判断是否获取到页面
-        if not follower_api:
-            return
-
-        try:
-            data = json.loads(follower_api)
-            # 获取关注者数量
-            follower_num = int(data['paging']['totals'])
-            is_end = bool(data['paging']['is_end'])
-        except Exception as err:
-            print(err)
-            traceback.print_exc()
-            print("获取关注者列表失败，放弃")
-            return
-
-        # 获取关注者列表
-        per_page = 20
-        # 开始获取所有的关注者 math.ceil(follower_num/20)*20
-        for i in range(0, int(math.ceil(follower_num / per_page)) * per_page, per_page):
-            try:
-                follower_api = self.get_follower_page(name_url, i, per_page)
-                data = json.loads(follower_api)
-                is_end = bool(data['paging']['is_end'])
-
-                for user in data['data']:
-                    self.add_wait_user(user['url_token'])  # 保存到redis
-
-                if is_end:
-                    break
-            except Exception as err:
-                print("获取关注者列表失败，继续循环")
-                print(err)
-                continue
-                pass
-
-    # 获取正在关注api
-    def get_following_page(self, name_url, offset=0, limit=20):
-        user_page_url = 'https://www.zhihu.com/api/v4/members/' + str(
-            name_url) + '/followees?include=data%5B*%5D.answer_count%2Carticles_count%2Cgender%2Cfollower_count%2Cis_followed%2Cis_following%2Cbadge%5B%3F(type%3Dbest_answerer)%5D.topics&offset=' + str(
-            offset) + '&limit=' + str(limit)
-        try:
-            index_html = self.session.get(user_page_url, headers=self.headers, timeout=35)
-        except Exception as err:
-            # 出现异常重试
-            print("失败name_url：" + str(name_url) + "获取页面失败，放弃该用户")
-            print(err)
-            traceback.print_exc()
-            return None
-        finally:
-            self.save_cookie()
-            pass
-        return index_html.text
-
-    # 获取正在关注列表
-    def get_all_following(self, name_url):
-        following_api = self.get_following_page(name_url)
-        # 判断是否获取到页面
-        if not following_api:
-            return
-
-        try:
-            data = json.loads(following_api)
-            # 获取关注者数量
-            following_num = int(data['paging']['totals'])
-            is_end = bool(data['paging']['is_end'])
-        except Exception as err:
-            print(err)
-            traceback.print_exc()
-            print("获取关注者列表失败，放弃")
-            return
-
-        # 获取关注者列表
-        per_page = 20
-        # 开始获取所有的关注者 math.ceil(follower_num/20)*20
-        for i in range(0, int(math.ceil(following_num / per_page)) * per_page, per_page):
-            try:
-                following_api = self.get_following_page(name_url, i, per_page)
-                data = json.loads(following_api)
-                is_end = bool(data['paging']['is_end'])
-
-                for user in data['data']:
-                    self.add_wait_user(user['url_token'])  # 保存到redis
-
-                if is_end:
-                    break
-            except Exception as err:
-                print("获取关注者列表失败，继续循环")
-                print(err)
-                continue
-                pass
-
     # 加入带抓取用户队列，先用redis判断是否已被抓取过
     def add_wait_user(self, name_url):
         # 判断是否已抓取
@@ -269,6 +190,8 @@ class GetUser(threading.Thread):
             self.redis_con.hset('already_get_user', name_url, 1)
             self.redis_con.lpush('user_queue', name_url)
             print("添加用户 " + name_url + "到队列")
+        else:
+            print(name_url + "已经在队列")
 
     # 获取页面出错移出redis
     def del_already_user(self, name_url):
@@ -294,6 +217,53 @@ class GetUser(threading.Thread):
             self.save_cookie()
             pass
         return index_html.text
+
+    def get_user_info_message(self, name_url):
+        url = "https://www.zhihu.com/people/{0}".format(name_url)
+
+        res = self.get_url_page(url)
+
+        BS = BeautifulSoup(res, "html.parser")
+        user_a = BS.find_all("a", class_="UserLink-link")  # 获取用户的a标签
+
+        for a in user_a:
+            if a:
+                href = a.get('href')
+                self.add_wait_user(href[(href.rindex('/')) + 1:])
+            else:
+                print("获取首页author-link失败，跳过")
+                continue
+
+        after_id=1
+
+        url_api = "https://www.zhihu.com/api/v3/moments/" + name_url + "/activities?limit=10&session_id=1208093516854898688&desktop=true"
+
+        count=0
+        url_1 = url_api + "&after_id=" + str(after_id)
+        while count < 100 :
+
+            try:
+                api_res = self.get_url_page(url_1)
+                data = json.loads(api_res)
+                if data['paging']['is_end']:
+                    break
+                flag=False
+                for s in data['data']:
+                    self.add_wait_user(s['target']['question']['author']['url_token'])
+                    after_id = s['id']
+                url_1=data['paging']['next']
+                print("after_id=" + url_1)
+                if flag:
+                    break
+            except Exception as err:
+                print("error parse")
+                break
+
+            count = count+1
+            print("count=" + str(count))
+            if count > 100:
+                break
+
 
     # 分析about页面，获取用户详细资料
     def get_user_info(self, name_url):
@@ -323,10 +293,14 @@ class GetUser(threading.Thread):
             # browse_num = int(BS.find_all("span", class_="zg-gray-normal")[6].find("strong").get_text())
             browse_num = 0  # 知乎个人首页改版，这里暂时没有数据可以抓了
             trade = user_info['business']['name'] if 'business' in user_info else ''
-            company = user_info['employments'][0]['company']['name'] if len(user_info['employments']) > 0 and 'company' in user_info['employments'][0]  else ''
-            school = user_info['educations'][0]['school']['name'] if len(user_info['educations']) > 0 and 'school' in user_info['educations'][0]  else ''
-            major = user_info['educations'][0]['major']['name'] if len(user_info['educations']) > 0 and 'major' in user_info['educations'][0] else ''
-            job = user_info['employments'][0]['job']['name'] if len(user_info['employments']) > 0 and 'job' in user_info['employments'][0] else ''
+            company = user_info['employments'][0]['company']['name'] if len(
+                user_info['employments']) > 0 and 'company' in user_info['employments'][0] else ''
+            school = user_info['educations'][0]['school']['name'] if len(user_info['educations']) > 0 and 'school' in \
+                                                                     user_info['educations'][0] else ''
+            major = user_info['educations'][0]['major']['name'] if len(user_info['educations']) > 0 and 'major' in \
+                                                                   user_info['educations'][0] else ''
+            job = user_info['employments'][0]['job']['name'] if len(user_info['employments']) > 0 and 'job' in \
+                                                                user_info['employments'][0] else ''
             location = user_info['locations'][0]['name'] if len(user_info['locations']) > 0 else ''
             description = user_info['description'] if 'description' in user_info else ''
             ask_num = int(user_info['question_count'])
@@ -366,12 +340,12 @@ class GetUser(threading.Thread):
                 traceback.print_exc()
 
         except Exception as err:
-            print(user_info)
             print("获取数据出错，跳过用户")
-            self.redis_con.hdel("already_get_user", name_url)
-            self.del_already_user(name_url)
-            print(err)
-            traceback.print_exc()
+            # print("获取数据出错，跳过用户")
+            # self.redis_con.hdel("already_get_user", name_url)
+            # self.del_already_user(name_url)
+            # print(err)
+            # traceback.print_exc()
             pass
 
     def save_cookie(self):
@@ -385,16 +359,16 @@ class GetUser(threading.Thread):
     # 开始抓取用户，程序总入口
     def entrance(self):
         while 1:
-            if int(self.redis_con.llen("user_queue")) <= 5:
+            if int(self.redis_con.llen("user_queue")) <= 0:
                 self.get_index_page_user()
             else:
                 # 出队列获取用户name_url redis取出的是byte，要decode成utf-8
                 name_url = str(self.redis_con.rpop("user_queue").decode('utf-8'))
                 print("正在处理name_url：" + name_url)
                 self.get_user_info(name_url)
+
                 if int(self.redis_con.llen("user_queue")) <= int(self.max_queue_len):
-                    self.get_all_follower(name_url)
-                    self.get_all_following(name_url)
+                    self.get_user_info_message(name_url)
             self.set_random_ua()
             self.save_cookie()
 
@@ -402,9 +376,8 @@ class GetUser(threading.Thread):
         print(self.name + " is running")
         self.entrance()
 
+
 if __name__ == '__main__':
-    # master代码不再需要登陆
-    # login = GetUser(999, "登陆线程")
 
     threads = []
     threads_num = int(cfg.get("sys", "thread_num"))
@@ -415,5 +388,5 @@ if __name__ == '__main__':
     for i in range(0, threads_num):
         threads[i].start()
 
-    for i in range(0, threads_num):
-        threads[i].join()
+    # for i in range(0, threads_num):
+    #     threads[i].join()
